@@ -26,7 +26,10 @@ while True:
     smOut = sm(outputs)
     print(smOut)
 
-    loss = -torch.log(smOut[0][0])
+    loss = -torch.log(smOut[0][0]) * (-1)
+    if loss.item() < -0.5:
+        loss = torch.max(loss, torch.tensor(-0.5))
+    # loss = torch.min(loss, torch.tensor(-100.0))
 
     # criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
