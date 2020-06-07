@@ -16,11 +16,11 @@ parser.add_argument('--use_cuda', help='Use if you want to use CUDA', action='st
 
 class Params:
     NUM_EPOCHS = 5000
-    ALPHA = 5e-3        # learning rate
-    BATCH_SIZE = 64     # how many episodes we want to pack into an epoch
-    GAMMA = 0.99        # discount rate
-    HIDDEN_SIZE = 64    # number of hidden nodes we have in our dnn
-    BETA = 0.1          # the entropy bonus multiplier
+    ALPHA = 5e-3  # learning rate
+    BATCH_SIZE = 64  # how many episodes we want to pack into an epoch
+    GAMMA = 0.99  # discount rate
+    HIDDEN_SIZE = 64  # number of hidden nodes we have in our dnn
+    BETA = 0.1  # the entropy bonus multiplier
 
 
 # Q-table is replaced by a neural network
@@ -55,10 +55,10 @@ class PolicyGradient:
 
         # instantiate the tensorboard writer
         self.writer = SummaryWriter(comment=f'_PG_CP_Gamma={self.GAMMA},'
-                                            f'LR={self.ALPHA},'
-                                            f'BS={self.BATCH_SIZE},'
-                                            f'NH={self.HIDDEN_SIZE},'
-                                            f'BETA={self.BETA}')
+        f'LR={self.ALPHA},'
+        f'BS={self.BATCH_SIZE},'
+        f'NH={self.HIDDEN_SIZE},'
+        f'BETA={self.BETA}')
 
         # create the environment
         self.env = gym.make('CartPole-v1') if problem == "CartPole" else gym.make('LunarLander-v2')
@@ -214,7 +214,6 @@ class PolicyGradient:
 
             # the episode is over
             if done:
-
                 # increment the episode
                 episode += 1
 
@@ -236,7 +235,7 @@ class PolicyGradient:
 
                 # weight the episode log-probabilities by the rewards-to-go
                 episode_weighted_log_probs = episode_log_probs * \
-                    torch.tensor(discounted_rewards_to_go).float().to(self.DEVICE)
+                                             torch.tensor(discounted_rewards_to_go).float().to(self.DEVICE)
 
                 # calculate the sum over trajectory of the weighted log-probabilities
                 sum_weighted_log_probs = torch.sum(episode_weighted_log_probs).unsqueeze(dim=0)
@@ -246,7 +245,8 @@ class PolicyGradient:
 
                 return sum_weighted_log_probs, episode_logits, sum_of_rewards, episode
 
-    def calculate_loss(self, epoch_logits: torch.Tensor, weighted_log_probs: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+    def calculate_loss(self, epoch_logits: torch.Tensor, weighted_log_probs: torch.Tensor) -> (
+    torch.Tensor, torch.Tensor):
         """
             Calculates the policy "loss" and the entropy bonus
             Args:
