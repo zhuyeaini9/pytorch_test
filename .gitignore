@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+# file: ~/.gitignore_global
+.idea
+
 # Distribution / packaging
 .Python
 build/
@@ -50,8 +53,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-.idea
-saves
+
 
 # Translations
 *.mo
