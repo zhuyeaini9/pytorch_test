@@ -50,6 +50,8 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.idea
+saves
 
 # Translations
 *.mo
@@ -123,6 +125,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-*.xml
-*.xml
-*.iml
+
