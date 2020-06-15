@@ -1,151 +1,316 @@
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
-import gym
-from gym import spaces
-import torch.optim as optim
-from torch.distributions import Categorical,normal
+import math
 import random
+
+import gym
 import numpy as np
 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.distributions import Categorical
 
-class Net(nn.Module):
-    def __init__(self, input_space, output_space):
-        super(Net, self).__init__()
+import matplotlib.pyplot as plt
 
-        self.fc1 = nn.Linear(input_space, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.mu = nn.Linear(64, output_space)
-        self.var = nn.Linear(64,output_space)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-
-        return F.tanh(self.mu(x)),F.softplus(self.var(x))
+from multiprocessing import Process, Pipe
 
 
-class PGAgent(object):
-    def __init__(self, env_name,batch_size = 3):
-        self.m_batch_size = batch_size
-        self.m_env = gym.make(env_name)
-        self.m_env._max_episode_steps = 1000
-        self.m_action_type = self.get_action_type()
-        self.m_action_size = self.get_action_size()
-        self.m_net = Net(self.get_input_space(), self.get_output_space())
-        self.m_adam = optim.Adam(params=self.m_net.parameters(), lr=0.01)
-        self.m_batch_reward = []
-        self.m_batch_state = []
-        self.m_batch_action = []
-
-    def get_input_space(self):
-        return self.m_env.observation_space.shape[0]
-
-    def get_action_size(self):
-        if self.m_action_type == 1:
-            return self.m_env.action_space.n
-
-    def get_output_space(self):
-        if self.m_action_type == 1:
-            return self.m_env.action_space.n
-        if self.m_action_type == 2:
-            return self.m_env.action_space.shape[0]
-
-    def get_action_type(self):
-        if isinstance(self.m_env.action_space, spaces.Discrete):
-            action_type = 1
+def worker(remote, parent_remote, env_fn_wrapper):
+    parent_remote.close()
+    env = env_fn_wrapper.x()
+    while True:
+        cmd, data = remote.recv()
+        if cmd == 'step':
+            ob, reward, done, info = env.step(data)
+            if done:
+                ob = env.reset()
+            remote.send((ob, reward, done, info))
+        elif cmd == 'reset':
+            ob = env.reset()
+            remote.send(ob)
+        elif cmd == 'reset_task':
+            ob = env.reset_task()
+            remote.send(ob)
+        elif cmd == 'close':
+            remote.close()
+            break
+        elif cmd == 'get_spaces':
+            remote.send((env.observation_space, env.action_space))
         else:
-            action_type = 2
-        return action_type
+            raise NotImplementedError
 
-    def get_action(self, mu, var):
-        nl = normal.Normal(mu,var)
-        s = nl.sample()
-        return s,nl.log_prob(s)
 
-    def calculate_discounted_rewards_normal(self, reward_list):
-        re = self.calculate_discounted_rewards(reward_list)
-        return self.normalise_rewards(re)
+class VecEnv(object):
+    """
+    An abstract asynchronous, vectorized environment.
+    """
 
-    def calculate_discounted_rewards(self, reward_list):
-        cur_re = 0
-        re_discounted_reward = []
-        for re in reversed(reward_list):
-            re = re + 0.99 * cur_re
-            cur_re = re
-            re_discounted_reward.append(re)
-        re_discounted_reward.reverse()
-        return re_discounted_reward
-
-    def normalise_rewards(self, rewards):
-        mean_reward = np.mean(rewards)
-        std_reward = np.std(rewards)
-        return (rewards - mean_reward) / (std_reward + 1e-8)
+    def __init__(self, num_envs, observation_space, action_space):
+        self.num_envs = num_envs
+        self.observation_space = observation_space
+        self.action_space = action_space
 
     def reset(self):
-        self.m_batch_state = []
-        self.m_batch_action = []
-        self.m_batch_reward = []
+        """
+        Reset all the environments and return an array of
+        observations, or a tuple of observation arrays.
+        If step_async is still doing work, that work will
+        be cancelled and step_wait() should not be called
+        until step_async() is invoked again.
+        """
+        pass
 
-    def step(self, step_index, step_all):
-        self.reset()
-        state = self.m_env.reset()
-        batch = 0
-        reward_record = []
-        reward_list = []
-        action_list = []
-        state_list = []
-        while True:
-            #be careful of detach
-            mu_v,var_v = self.m_net(torch.tensor(state).float())
-            tar_action,log_prob = self.get_action(mu_v.detach(), var_v.detach())
-            new_state, reward, done, _ = self.m_env.step(tar_action)
+    def step_async(self, actions):
+        """
+        Tell all the environments to start taking a step
+        with the given actions.
+        Call step_wait() to get the results of the step.
+        You should not call this if a step_async run is
+        already pending.
+        """
+        pass
 
-            reward_list.append(reward)
-            action_list.append(tar_action)
-            state_list.append(state)
+    def step_wait(self):
+        """
+        Wait for the step taken with step_async().
+        Returns (obs, rews, dones, infos):
+         - obs: an array of observations, or a tuple of
+                arrays of observations.
+         - rews: an array of rewards
+         - dones: an array of "episode done" booleans
+         - infos: a sequence of info objects
+        """
+        pass
 
-            state = new_state
+    def close(self):
+        """
+        Clean up the environments' resources.
+        """
+        pass
 
-            if done:
-                batch += 1
-
-                self.m_batch_reward.extend(self.calculate_discounted_rewards_normal(reward_list))
-                self.m_batch_action.extend(action_list)
-                self.m_batch_state.extend(state_list)
-
-                reward_record.append(sum(reward_list))
-
-                reward_list = []
-                action_list = []
-                state_list = []
-                state = self.m_env.reset()
-
-                if batch == self.m_batch_size:
-                    break
-
-        print(step_index, reward_record)
-
-        state_tensor = torch.FloatTensor(self.m_batch_state)
-        reward_tensor = torch.FloatTensor(self.m_batch_reward)
-        action_tensor = torch.LongTensor(self.m_batch_action)
-
-        # Calculate loss
-        mu_v,var_v = self.m_net(state_tensor)
-
-        selected_logprobs = reward_tensor * log_prob[np.arange(len(action_tensor)), action_tensor]
-        loss = -selected_logprobs.mean()
-
-        self.m_adam.zero_grad()
-        # Calculate gradients
-        loss.backward()
-        # Apply gradients
-        self.m_adam.step()
-
-    def run_n_step(self, n):
-        for i in range(n):
-            self.step(i, n)
+    def step(self, actions):
+        self.step_async(actions)
+        return self.step_wait()
 
 
-agent = PGAgent('MountainCarContinuous-v0')
-agent.run_n_step(300)
+class CloudpickleWrapper(object):
+    """
+    Uses cloudpickle to serialize contents (otherwise multiprocessing tries to use pickle)
+    """
+
+    def __init__(self, x):
+        self.x = x
+
+    def __getstate__(self):
+        import cloudpickle
+        return cloudpickle.dumps(self.x)
+
+    def __setstate__(self, ob):
+        import pickle
+        self.x = pickle.loads(ob)
+
+
+class SubprocVecEnv(VecEnv):
+    def __init__(self, env_fns, spaces=None):
+        """
+        envs: list of gym environments to run in subprocesses
+        """
+        self.waiting = False
+        self.closed = False
+        nenvs = len(env_fns)
+        self.nenvs = nenvs
+        self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(nenvs)])
+        self.ps = [Process(target=worker, args=(work_remote, remote, CloudpickleWrapper(env_fn)))
+                   for (work_remote, remote, env_fn) in zip(self.work_remotes, self.remotes, env_fns)]
+        for p in self.ps:
+            p.daemon = True  # if the main process crashes, we should not cause things to hang
+            p.start()
+        for remote in self.work_remotes:
+            remote.close()
+
+        self.remotes[0].send(('get_spaces', None))
+        observation_space, action_space = self.remotes[0].recv()
+        VecEnv.__init__(self, len(env_fns), observation_space, action_space)
+
+    def step_async(self, actions):
+        for remote, action in zip(self.remotes, actions):
+            remote.send(('step', action))
+        self.waiting = True
+
+    def step_wait(self):
+        results = [remote.recv() for remote in self.remotes]
+        self.waiting = False
+        obs, rews, dones, infos = zip(*results)
+        return np.stack(obs), np.stack(rews), np.stack(dones), infos
+
+    def reset(self):
+        for remote in self.remotes:
+            remote.send(('reset', None))
+        return np.stack([remote.recv() for remote in self.remotes])
+
+    def reset_task(self):
+        for remote in self.remotes:
+            remote.send(('reset_task', None))
+        return np.stack([remote.recv() for remote in self.remotes])
+
+    def close(self):
+        if self.closed:
+            return
+        if self.waiting:
+            for remote in self.remotes:
+                remote.recv()
+        for remote in self.remotes:
+            remote.send(('close', None))
+        for p in self.ps:
+            p.join()
+            self.closed = True
+
+    def __len__(self):
+        return self.nenvs
+
+use_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if use_cuda else "cpu")
+
+
+
+num_envs = 8
+env_name = "MountainCarContinuous-v0"
+
+
+def make_env():
+    def _thunk():
+        env = gym.make(env_name)
+        return env
+
+    return _thunk
+
+
+plt.ion()
+envs = [make_env() for i in range(num_envs)]
+envs = SubprocVecEnv(envs)  # 8 env
+
+env = gym.make(env_name)  # a single env
+
+
+class ActorCritic(nn.Module):
+    def __init__(self, num_inputs, num_outputs, hidden_size, std=0.0):
+        super(ActorCritic, self).__init__()
+
+        self.critic = nn.Sequential(
+            nn.Linear(num_inputs, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1)
+        )
+
+        self.actor = nn.Sequential(
+            nn.Linear(num_inputs, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, num_outputs),
+            nn.Softmax(dim=1),
+        )
+
+    def forward(self, x):
+        value = self.critic(x)
+        probs = self.actor(x)
+        dist = Categorical(probs)
+        return dist, value
+
+
+def test_env(vis=False):
+    state = env.reset()
+    if vis: env.render()
+    done = False
+    total_reward = 0
+    while not done:
+        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        dist, _ = model(state)
+        next_state, reward, done, _ = env.step(dist.sample().cpu().numpy()[0])
+        state = next_state
+        if vis: env.render()
+        total_reward += reward
+    return total_reward
+
+
+def compute_returns(next_value, rewards, masks, gamma=0.99):
+    R = next_value
+    returns = []
+    for step in reversed(range(len(rewards))):
+        R = rewards[step] + gamma * R * masks[step]
+        returns.insert(0, R)
+    return returns
+
+
+def plot(frame_idx, rewards):
+    plt.plot(rewards, 'b-')
+    plt.title('frame %s. reward: %s' % (frame_idx, rewards[-1]))
+    plt.pause(0.0001)
+
+
+num_inputs = envs.observation_space.shape[0]
+num_outputs = envs.action_space.n
+
+# Hyper params:
+hidden_size = 256
+lr = 1e-3
+num_steps = 5
+
+model = ActorCritic(num_inputs, num_outputs, hidden_size).to(device)
+optimizer = optim.Adam(model.parameters())
+
+max_frames = 20000
+frame_idx = 0
+test_rewards = []
+
+state = envs.reset()
+
+while frame_idx < max_frames:
+
+    log_probs = []
+    values = []
+    rewards = []
+    masks = []
+    entropy = 0
+
+    # rollout trajectory
+    for _ in range(num_steps):
+        state = torch.FloatTensor(state).to(device)
+        dist, value = model(state)
+
+        action = dist.sample()
+        next_state, reward, done, _ = envs.step(action.cpu().numpy())
+
+        log_prob = dist.log_prob(action)
+        entropy += dist.entropy().mean()
+
+        log_probs.append(log_prob)
+        values.append(value)
+        rewards.append(torch.FloatTensor(reward).unsqueeze(1).to(device))
+        masks.append(torch.FloatTensor(1 - done).unsqueeze(1).to(device))
+
+        state = next_state
+        frame_idx += 1
+
+        if frame_idx % 100 == 0:
+            test_rewards.append(np.mean([test_env() for _ in range(10)]))
+            plot(frame_idx, test_rewards)
+
+    next_state = torch.FloatTensor(next_state).to(device)
+    _, next_value = model(next_state)
+    returns = compute_returns(next_value, rewards, masks)
+
+    log_probs = torch.cat(log_probs)
+    returns = torch.cat(returns).detach()
+    values = torch.cat(values)
+
+    advantage = returns - values
+
+    actor_loss = -(log_probs * advantage.detach()).mean()
+    critic_loss = advantage.pow(2).mean()
+
+    loss = actor_loss + 0.5 * critic_loss - 0.001 * entropy
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+# test_env(True)
