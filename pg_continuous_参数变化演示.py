@@ -23,7 +23,7 @@ class Net(nn.Module):
 
 net = Net()
 rd = torch.tensor([[0.8, 0.2, 0.3, 0.4]])
-optimizer = optim.Adam(net.parameters(), lr=0.01)
+optimizer = optim.Adam(net.parameters(), lr=0.001)
 
 
 while True:
@@ -33,10 +33,10 @@ while True:
     act_log = action_distribution.log_prob(sample)
     # print(outputs,act_log)
 
-    reward = torch.tensor(1.5)
+    reward = torch.tensor(10.5)
 
     loss = -act_log * reward
-    print(sample,math.pow(math.e,act_log.data.numpy()),[means.data,stds.data], -act_log)
+    print([means.data,stds.data])
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
