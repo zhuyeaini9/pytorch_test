@@ -33,7 +33,7 @@ while True:
     act_log = action_distribution.log_prob(sample)
     # print(outputs,act_log)
 
-    reward = torch.tensor(10.5)
+    reward = torch.tensor(-10.5)
 
     loss = -act_log * reward
     print([means.data,stds.data])
