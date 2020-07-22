@@ -40,6 +40,17 @@ class Replay_Buffer(object):
             experience = self.experience(states, actions, rewards, next_states, dones)
             self.memory.append(experience)
 
+    def batchs(self, batch_size=None):
+        if batch_size is not None:
+            bs = batch_size
+        else:
+            bs = self.batch_size
+
+        for i in range(0, len(self.memory), batch_size):
+            experiences = self.memory[i:i + batch_size]
+            states, actions, rewards, next_states, dones = self.separate_out_data_types(experiences)
+            yield states, actions, rewards, next_states, dones
+
     def sample(self, num_experiences=None, separate_out_data_types=True):
         """Draws a random sample of experience from the replay buffer"""
         experiences = self.pick_experiences(num_experiences)
