@@ -17,21 +17,72 @@ from collections import namedtuple, deque
 class Replay_Buffer(object):
     """Replay buffer to store past experiences that the agent can then use for training data"""
 
-    def __init__(self, learn_size=64 * 64, batch_size=64):
+    def __init__(self, agent, batch_size=64):
+        self.agent = agent
         self.memory = []
-        self.learn_size = learn_size
         self.batch_size = batch_size
         self.experience = namedtuple("Experience",
                                      field_names=["state", "action", "reward", "next_state", "done", "log_prob_action"])
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
+        self.state = []
+        self.action = []
+        self.reward = []
+        self.next_state = []
+        self.done = []
+        self.log_prob_action = []
 
     def reset(self):
         self.memory.clear()
+        self.state.clear()
+        self.action.clear()
+        self.reward.clear()
+        self.next_state.clear()
+        self.done.clear()
+        self.log_prob_action.clear()
 
-    def can_learn(self):
-        if len(self.memory) >= self.learn_size:
-            return True
-        return False
+    def add_experience2(self, states, actions, rewards, next_states, dones, log_prob_action):
+        self.state.append(states)
+        self.action.append(actions)
+        self.reward.append(rewards)
+        self.next_state.append(next_states)
+        self.done.append(dones)
+        self.log_prob_action.append(log_prob_action)
+
+    def cal(self):
+        gaes = []
+        with torch.no_grad():
+            self.state_tensor = torch.tensor(self.state).float()
+            self.next_state_tensor = torch.tensor(self.next_state).float()
+            self.log_prob_action_tensor = torch.tensor(self.log_prob_action).float().unsqueeze(dim=1)
+            self.action_tensor = torch.tensor(self.action).float().unsqueeze(dim=1)
+            self.value = self.agent.critic(self.state_tensor)
+            v_ = self.agent.critic(self.next_state_tensor)
+            m = (1. - torch.tensor(self.done).float().unsqueeze(dim=1)) * self.agent.gamma
+            delta = torch.tensor(self.reward).float().unsqueeze(dim=1) + v_ * m - self.value
+            m *= self.agent.gae_lambda
+            gae = 0.
+            for j in range(len(self.reward) - 1, -1, -1):
+                gae = delta[j] + m[j] * gae
+                gaes.insert(0, gae)
+
+            gaes = torch.cat(gaes, dim=0).unsqueeze(dim=1)
+            self.returns = self.normal(gaes + self.value).unsqueeze(dim=1)
+            self.gaes = self.normal(gaes).unsqueeze(dim=1)
+
+    def batchs2(self):
+        for i in range(0, len(self.done), self.batch_size):
+            yield {"state": self.state_tensor[i:i + self.batch_size]
+                , "action": self.action_tensor[i:i + self.batch_size]
+                , "value": self.value[i:i + self.batch_size]
+                , "log_prob_action": self.log_prob_action_tensor[i:i + self.batch_size]
+                , "returns": self.returns[i:i + self.batch_size]
+                , "gaes": self.gaes[i:i + self.batch_size]}
+
+    def normal(self, rs):
+        rs_ = rs.numpy()
+        mean_reward = np.mean(rs_)
+        std_reward = np.std(rs_)
+        return (rs - mean_reward) / (std_reward + 1e-8)
 
     def add_experience(self, states, actions, rewards, next_states, dones, log_prob_action):
         """Adds experience(s) into the replay buffer"""
@@ -123,7 +174,7 @@ class EnvHelper(object):
 class Actor(nn.Module):
     def __init__(self, env, layer_num=2, layer_size=128):
         super().__init__()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cpu')
         self.env_helper = EnvHelper(env)
         self.env_type = self.env_helper.get_env_type()
         self.model = [
@@ -154,9 +205,9 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, env, layer_num=2, layer_size=128):
+    def __init__(self, env, layer_num=1, layer_size=128):
         super().__init__()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cpu')
         self.env_helper = EnvHelper(env)
         self.model = [
             nn.Linear(self.env_helper.get_obs_space(), layer_size),
@@ -172,8 +223,12 @@ class Critic(nn.Module):
 
 
 class PPOAgent(object):
-    def __init__(self, env, learn_step_per_epsoid=2, epsoid=200, gamma=0.9, gae_lambda=0.9, eps_clip=0.3,
-                 max_grad_norm=0.5):
+    def __init__(self, env, learn_step_per_epsoid=1, collect_env_step=10, epsoid=20000, gamma=0.99, gae_lambda=0.95,
+                 eps_clip=0.3,
+                 max_grad_norm=.5, w_c_loss=.5, w_e_loss=.0):
+        self.collect_env_step = collect_env_step
+        self.w_c_loss = w_c_loss
+        self.w_e_loss = w_e_loss
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.eps_clip = eps_clip
@@ -186,8 +241,8 @@ class PPOAgent(object):
         self.env = env
         self.actor = Actor(env)
         self.critic = Critic(env)
-        self.memory = Replay_Buffer()
-        self.optim = torch.optim.Adam(list(self.actor.parameters()) + list(self.critic.parameters()), lr=0.001)
+        self.memory = Replay_Buffer(self)
+        self.optim = torch.optim.Adam(list(self.actor.parameters()) + list(self.critic.parameters()), lr=0.0001)
 
     def run(self):
         for i in range(self.epsoid):
@@ -199,41 +254,66 @@ class PPOAgent(object):
         return act, action_dist.log_prob(torch.tensor(act).float()).item()
 
     def step(self, epsoid_index):
-        self.env.seed(self.seed)
         obs = self.env.reset()
         self.memory.reset()
+
+        rewards = []
+        rewards_sum = []
+        cur_env_step = 1
         while True:
             action, log_prop_action = self.pick_action(obs)
             new_obs, reward, done, _ = self.env.step(action)
-            self.memory.add_experience(obs, action, reward, new_obs, done, log_prop_action)
+            rewards.append(reward)
+            self.memory.add_experience2(obs, action, reward, new_obs, done, log_prop_action)
+            if done:
+                rewards_sum.append(sum(rewards))
+                rewards = []
+                new_obs = self.env.reset()
+                cur_env_step += 1
+                if cur_env_step >= self.collect_env_step:
+                    ave_reward = np.mean(rewards_sum)
+                    if ave_reward >= 190 or epsoid_index % 200 == 0:
+                        print("epsoid:", epsoid_index, " reward:", ave_reward, "test:", self.test())
+
+                    rewards_sum = []
+                    break
             obs = new_obs
-            if self.memory.can_learn():
-                self.learn()
-                break
+
+        self.learn()
+
+    def test(self):
+        reward_test_list = []
+        obs = self.env.reset()
+        while True:
+            action_test, _ = self.pick_action(obs)
+            new_obs_test, reward_test, done_test, _ = self.env.step(action_test)
+            reward_test_list.append(reward_test)
+            if done_test:
+                return sum(reward_test_list)
+            obs = new_obs_test
 
     def learn(self):
-        batchs = []
-        with torch.no_grad():
-            for b in self.memory.batchs():
-                batchs.append(Batch(self, b[0], b[1], b[2], b[3], b[4], b[5]))
+        self.memory.cal()
         for _ in range(self.learn_step_per_epsoid):
-            for b in batchs:
-                dist = self.actor(b.states)
-                value = self.critic(b.states)
+            for b in self.memory.batchs2():
+                dist = self.actor(b["state"])
+                value = self.critic(b["state"])
 
-                ratio = (dist.log_prob(b.actions.squeeze(dim=1)) - b.log_prob_action.squeeze(dim=1)).exp().float()
-                surr1 = ratio * b.gaes
-                surr2 = ratio.clamp(1. - self.eps_clip, 1. + self.eps_clip) * b.gaes
+                ratio = (dist.log_prob(b["action"].squeeze(dim=1)) - b["log_prob_action"].squeeze(dim=1)).exp().float()
+                ratio = ratio.unsqueeze(dim=1)
+                surr1 = ratio * b["gaes"]
+                surr2 = ratio.clamp(1. - self.eps_clip, 1. + self.eps_clip) * b["gaes"]
                 actor_loss = -torch.min(surr1, surr2).mean()
 
-                v_clip = b.value + (value - b.value).clamp(-self.eps_clip, self.eps_clip)
-                vf1 = (b.value - value).pow(2)
-                vf2 = (b.value - v_clip).pow(2)
+                v_clip = b["value"] + (value - b["value"]).clamp(-self.eps_clip, self.eps_clip)
+                vf1 = (b["returns"] - value).pow(2)
+                vf2 = (b["returns"] - v_clip).pow(2)
                 critic_loss = .5 * torch.max(vf1, vf2).mean()
+                # critic_loss = (b.returns - value).pow(2).mean()
 
                 e_loss = dist.entropy().mean()
 
-                loss = actor_loss + critic_loss + e_loss
+                loss = actor_loss + self.w_c_loss * critic_loss - self.w_e_loss * e_loss
 
                 self.optim.zero_grad()
                 loss.backward()
@@ -251,31 +331,30 @@ class Batch(object):
         self.next_states = next_states
         self.dones = dones
         self.log_prob_action = log_prob_action
-        self.gaes = []
-        self.value = []
         self.cal()
-        self.value = torch.cat(self.value,dim=0)
-        self.gaes = torch.cat(self.gaes,dim=0)
 
     def cal(self):
+        gaes = []
         with torch.no_grad():
-            v = self.agent.critic(self.states)
-            self.value.append(v)
+            self.value = self.agent.critic(self.states)
             v_ = self.agent.critic(self.next_states)
             m = (1. - self.dones) * self.agent.gamma
-            delta = self.rewards + v_ * m - v
+            delta = self.rewards + v_ * m - self.value
             m *= self.agent.gae_lambda
             gae = 0.
             for j in range(len(self.rewards) - 1, -1, -1):
                 gae = delta[j] + m[j] * gae
-                self.gaes.insert(0, gae)
+                gaes.insert(0, gae)
 
-            self.normalise_rewards(self.gaes)
+            gaes = torch.cat(gaes, dim=0).unsqueeze(dim=1)
+            self.returns = self.normal(gaes + v).unsqueeze(dim=1)
+            self.gaes = self.normal(gaes).unsqueeze(dim=1)
 
-    def normalise_rewards(self, rewards):
-        mean_reward = np.mean(rewards)
-        std_reward = np.std(rewards)
-        return (rewards - mean_reward) / (std_reward + 1e-8)
+    def normal(self, rs):
+        rs_ = rs.numpy()
+        mean_reward = np.mean(rs_)
+        std_reward = np.std(rs_)
+        return (rs - mean_reward) / (std_reward + 1e-8)
 
 
 if __name__ == '__main__':

@@ -2,7 +2,8 @@ import gym
 import gym.spaces
 import numpy as np
 import math
-
+from collections import namedtuple, deque
+import torch
 # env = gym.make('CartPole-v0')
 # print(env.action_space)
 # #> Discrete(2)
@@ -25,10 +26,22 @@ import math
 
 #print(abs(max(kkk.low.all(), key=abs)))
 
-def ttt():
-    b = 10
-    a = [1,2,3,4,5,6,7,8,9]
-    for i in range(0,len(a),b):
-        print(i,a[i:i+b])
+# def ttt():
+#     b = 10
+#     a = [1,2,3,4,5,6,7,8,9]
+#     for i in range(0,len(a),b):
+#         print(i,a[i:i+b])
+#
+# ttt()
 
-ttt()
+#
+# t = deque(maxlen=3)
+# t.append(3)
+# t.append(2)
+# t.append(1)
+# t.append(4)
+#
+# print(t)
+
+a = torch.tensor([1.,2.,3.])
+print(np.mean(a.numpy()))
