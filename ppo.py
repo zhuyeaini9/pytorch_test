@@ -19,11 +19,9 @@ class Replay_Buffer(object):
 
     def __init__(self, agent, batch_size=64):
         self.agent = agent
-        self.memory = []
         self.batch_size = batch_size
-        self.experience = namedtuple("Experience",
-                                     field_names=["state", "action", "reward", "next_state", "done", "log_prob_action"])
         self.device = torch.device("cpu")
+
         self.state = []
         self.action = []
         self.reward = []
@@ -31,8 +29,12 @@ class Replay_Buffer(object):
         self.done = []
         self.log_prob_action = []
 
+    def can_learn(self, s):
+        if len(self.reward) >= s:
+            return True
+        return False
+
     def reset(self):
-        self.memory.clear()
         self.state.clear()
         self.action.clear()
         self.reward.clear()
@@ -40,7 +42,7 @@ class Replay_Buffer(object):
         self.done.clear()
         self.log_prob_action.clear()
 
-    def add_experience2(self, states, actions, rewards, next_states, dones, log_prob_action):
+    def add_experience(self, states, actions, rewards, next_states, dones, log_prob_action):
         self.state.append(states)
         self.action.append(actions)
         self.reward.append(rewards)
@@ -69,7 +71,7 @@ class Replay_Buffer(object):
             self.returns = self.normal(gaes + self.value).unsqueeze(dim=1)
             self.gaes = self.normal(gaes).unsqueeze(dim=1)
 
-    def batchs2(self):
+    def batchs(self):
         for i in range(0, len(self.done), self.batch_size):
             yield {"state": self.state_tensor[i:i + self.batch_size]
                 , "action": self.action_tensor[i:i + self.batch_size]
@@ -83,61 +85,6 @@ class Replay_Buffer(object):
         mean_reward = np.mean(rs_)
         std_reward = np.std(rs_)
         return (rs - mean_reward) / (std_reward + 1e-8)
-
-    def add_experience(self, states, actions, rewards, next_states, dones, log_prob_action):
-        """Adds experience(s) into the replay buffer"""
-        if type(dones) == list:
-            assert type(dones[0]) != list, "A done shouldn't be a list"
-            experiences = [self.experience(state, action, reward, next_state, done, log_prob_action)
-                           for state, action, reward, next_state, done in
-                           zip(states, actions, rewards, next_states, dones, log_prob_action)]
-            self.memory.extend(experiences)
-        else:
-            experience = self.experience(states, actions, rewards, next_states, dones, log_prob_action)
-            self.memory.append(experience)
-
-    def batchs(self, batch_size=None):
-        if batch_size is not None:
-            bs = batch_size
-        else:
-            bs = self.batch_size
-
-        for i in range(0, len(self.memory), bs):
-            experiences = self.memory[i:i + bs]
-            states, actions, rewards, next_states, dones, log_prob_action = self.separate_out_data_types(experiences)
-            yield [states, actions, rewards, next_states, dones, log_prob_action]
-
-    def sample(self, num_experiences=None, separate_out_data_types=True):
-        """Draws a random sample of experience from the replay buffer"""
-        experiences = self.pick_experiences(num_experiences)
-        if separate_out_data_types:
-            states, actions, rewards, next_states, dones, log_prob_action = self.separate_out_data_types(experiences)
-            return states, actions, rewards, next_states, dones, log_prob_action
-        else:
-            return experiences
-
-    def separate_out_data_types(self, experiences):
-        """Puts the sampled experience into the correct format for a PyTorch neural network"""
-        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(self.device)
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float().to(self.device)
-        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(self.device)
-        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(
-            self.device)
-        dones = torch.from_numpy(np.vstack([int(e.done) for e in experiences if e is not None])).float().to(self.device)
-        log_prob_action = torch.from_numpy(
-            np.vstack([e.log_prob_action for e in experiences if e is not None])).float().to(self.device)
-
-        return states, actions, rewards, next_states, dones, log_prob_action
-
-    def pick_experiences(self, num_experiences=None):
-        if num_experiences is not None:
-            batch_size = num_experiences
-        else:
-            batch_size = self.batch_size
-        return random.sample(self.memory, k=batch_size)
-
-    def __len__(self):
-        return len(self.memory)
 
 
 class EnvHelper(object):
@@ -223,10 +170,11 @@ class Critic(nn.Module):
 
 
 class PPOAgent(object):
-    def __init__(self, env, learn_step_per_epsoid=1, collect_env_step=10, epsoid=20000, gamma=0.99, gae_lambda=0.95,
+    def __init__(self, env, learn_step_per_epsoid=1, learn_buffer_size=64 * 10, epsoid=20000, gamma=0.99,
+                 gae_lambda=0.95,
                  eps_clip=0.3,
                  max_grad_norm=.5, w_c_loss=.5, w_e_loss=.0):
-        self.collect_env_step = collect_env_step
+        self.learn_buffer_size = learn_buffer_size
         self.w_c_loss = w_c_loss
         self.w_e_loss = w_e_loss
         self.gamma = gamma
@@ -257,29 +205,19 @@ class PPOAgent(object):
         obs = self.env.reset()
         self.memory.reset()
 
-        rewards = []
-        rewards_sum = []
-        cur_env_step = 1
         while True:
             action, log_prop_action = self.pick_action(obs)
             new_obs, reward, done, _ = self.env.step(action)
-            rewards.append(reward)
-            self.memory.add_experience2(obs, action, reward, new_obs, done, log_prop_action)
+            self.memory.add_experience(obs, action, reward, new_obs, done, log_prop_action)
             if done:
-                rewards_sum.append(sum(rewards))
-                rewards = []
                 new_obs = self.env.reset()
-                cur_env_step += 1
-                if cur_env_step >= self.collect_env_step:
-                    ave_reward = np.mean(rewards_sum)
-                    if ave_reward >= 190 or epsoid_index % 200 == 0:
-                        print("epsoid:", epsoid_index, " reward:", ave_reward, "test:", self.test())
 
-                    rewards_sum = []
-                    break
             obs = new_obs
+            if self.memory.can_learn(self.learn_buffer_size):
+                break
 
         self.learn()
+        print(epsoid_index, self.test())
 
     def test(self):
         reward_test_list = []
@@ -295,7 +233,7 @@ class PPOAgent(object):
     def learn(self):
         self.memory.cal()
         for _ in range(self.learn_step_per_epsoid):
-            for b in self.memory.batchs2():
+            for b in self.memory.batchs():
                 dist = self.actor(b["state"])
                 value = self.critic(b["state"])
 
