@@ -198,8 +198,12 @@ class PPOAgent(object):
 
     def pick_action(self, obs):
         action_dist = self.actor(torch.tensor(obs).float().unsqueeze(dim=0))
-        act = action_dist.sample().item()
-        return act, action_dist.log_prob(torch.tensor(act).float()).item()
+        if self.env_helper.get_env_type() == 1:
+            act = action_dist.sample().item()
+            return act, action_dist.log_prob(torch.tensor(act).float()).item()
+        else:
+            act = action_dist.sample()
+            return act, action_dist.log_prob(act).item()
 
     def step(self, epsoid_index):
         obs = self.env.reset()
@@ -297,6 +301,7 @@ class Batch(object):
 
 if __name__ == '__main__':
     gym.logger.set_level(50)
-    env = gym.make("CartPole-v0")
+    # env = gym.make("CartPole-v0")
+    env = gym.make("MountainCarContinuous-v0")
     agent = PPOAgent(env)
     agent.run()

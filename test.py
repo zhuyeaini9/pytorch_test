@@ -43,5 +43,6 @@ import torch
 #
 # print(t)
 
-a = torch.tensor([1.,2.,3.])
-print(np.mean(a.numpy()))
+env = gym.make("MountainCarContinuous-v0")
+a = env.action_space.sample()
+print('kkkk')
